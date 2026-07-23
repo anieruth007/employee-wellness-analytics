@@ -1,0 +1,20 @@
+# Research-backed ROI thresholds for personality-proxy label synthesis (Path 2)
+# Sources: Fernández et al. (2024, Anxiety Stress Coping); Gioia et al. (2023, Sensors);
+# Frontiers in Psychiatry (2025); Barrick & Mount (1991) for N/C as engagement predictors.
+
+rois:
+  - nose_tip
+  - forehead
+  - periorbital
+  - upper_lip
+
+thresholds:
+  nose_tip_drop_c: 0.5          # °C drop from baseline -> High Neuroticism proxy
+  forehead_elevation_c: 0.3     # °C rise from baseline -> High Conscientiousness proxy
+  differential_index_c: -0.5    # nose_tip - periorbital < this -> High Neuroticism confirmed
+
+baseline:
+  window_seconds: 30            # resting window used to establish per-subject baseline temps
+
+differential_index:
+  formula: "nose_tip - periorbital"

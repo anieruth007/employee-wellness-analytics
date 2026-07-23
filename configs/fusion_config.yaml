@@ -1,0 +1,27 @@
+# Fusion layer + 3-way engagement classifier
+model:
+  name: fusion_classifier
+  temporal_dim: 256           # from bilstm_attention
+  proxy_dim: 2                # [N_proxy, C_proxy] from src/roi
+  fused_dim: 258
+  hidden_dims: [128, 64]
+  num_classes: 3              # Disengaged, Neutral, Engaged
+  dropout: 0.3
+
+training:
+  batch_size: 16
+  epochs: 20
+  lr: 0.0005
+  weight_decay: 0.0001
+  optimizer: adamw
+  scheduler: cosine
+  mixed_precision: true
+  checkpoint_dir: checkpoints/fusion
+  freeze_upstream: true       # freeze CNN + BiLSTM, train fusion head only
+
+class_names: [Disengaged, Neutral, Engaged]
+
+data:
+  processed_dir: data/processed
+  labels_dir: data/labels
+  seed: 42

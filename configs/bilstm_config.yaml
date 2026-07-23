@@ -1,0 +1,26 @@
+# Path 1, stage B — BiLSTM + Attention temporal module
+model:
+  name: bilstm_attention
+  input_dim: 256              # per-frame spatial feature dim from thermal_cnn
+  hidden_dim: 128
+  num_layers: 1
+  bidirectional: true
+  attention_dim: 128
+  sequence_length: 10
+  output_dim: 256             # temporal context vector fed to fusion layer
+
+training:
+  batch_size: 8               # sequence batching is more VRAM-hungry than single-frame CNN training
+  epochs: 25
+  lr: 0.0005
+  weight_decay: 0.0001
+  optimizer: adamw
+  scheduler: cosine
+  mixed_precision: true
+  num_workers: 4
+  checkpoint_dir: checkpoints/bilstm
+  freeze_cnn_backbone: true   # train BiLSTM on frozen CNN features from stage A
+
+data:
+  processed_dir: data/processed
+  seed: 42
