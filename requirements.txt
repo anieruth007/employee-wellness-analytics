@@ -6,6 +6,10 @@ torchvision>=0.16
 # Landmark detection
 mediapipe>=0.10
 
+# FLIR E8 radiometric JPEG -> raw temperature array (also requires ExifTool installed
+# system-wide: https://exiftool.org/)
+flirimageextractor>=1.4
+
 # Data / image handling
 numpy>=1.24
 pandas>=2.0

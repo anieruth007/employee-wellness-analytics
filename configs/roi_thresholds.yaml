@@ -1,20 +1,35 @@
-# Research-backed ROI thresholds for personality-proxy label synthesis (Path 2)
+# Research-backed ROI thresholds for personality-proxy label synthesis (Pipeline 2)
 # Sources: Fernández et al. (2024, Anxiety Stress Coping); Gioia et al. (2023, Sensors);
 # Frontiers in Psychiatry (2025); Barrick & Mount (1991) for N/C as engagement predictors.
+#
+# Single-frame capture (no per-subject resting window): baseline is a fixed POPULATION
+# statistic computed once from Charlotte-ThermalFace training data (mean ROI temps under
+# neutral/resting label), not a per-session calibration step. This matches the "one thermal
+# image per employee per session" attendance-integration constraint — there's no time to
+# collect a live resting baseline before each capture.
 
 rois:
-  - nose_tip
-  - forehead
-  - periorbital
-  - upper_lip
+  nose_tip:
+    landmarks: [4]
+  forehead:
+    landmarks: [10, 338, 297, 332, 284]
+  periorbital:
+    landmarks: [33, 133, 362, 263]
+  upper_lip:
+    landmarks: [13]
+# Landmark indices are MediaPipe FaceMesh (468-point) indices, run on the normalized
+# grayscale thermal image before it is resized to 48x48 for the CNN branch — landmark
+# detection needs the original captured resolution, not the downsized CNN input.
 
 thresholds:
-  nose_tip_drop_c: 0.5          # °C drop from baseline -> High Neuroticism proxy
-  forehead_elevation_c: 0.3     # °C rise from baseline -> High Conscientiousness proxy
+  nose_tip_drop_c: 0.5          # °C drop from population baseline -> High Neuroticism proxy (1)
+  nose_tip_stable_band_c: 0.2   # within ±0.2°C of baseline -> Low Neuroticism proxy (0)
+  forehead_elevation_c: 0.3     # °C rise from population baseline -> High Conscientiousness proxy (1)
   differential_index_c: -0.5    # nose_tip - periorbital < this -> High Neuroticism confirmed
 
-baseline:
-  window_seconds: 30            # resting window used to establish per-subject baseline temps
-
 differential_index:
-  formula: "nose_tip - periorbital"
+  formula: "mean(nose_tip_temp) - mean(periorbital_temp)"
+
+population_baseline:
+  source: data/labels/population_baseline.json  # computed once from training split, see src/roi/labeling.py
+  fields: [nose_tip_mean_c, forehead_mean_c, periorbital_mean_c, upper_lip_mean_c]

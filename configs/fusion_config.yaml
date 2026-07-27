@@ -1,7 +1,7 @@
 # Fusion layer + 3-way engagement classifier
 model:
   name: fusion_classifier
-  temporal_dim: 256           # from bilstm_attention
+  expression_dim: 256         # from thermal_cnn, single-image feature vector
   proxy_dim: 2                # [N_proxy, C_proxy] from src/roi
   fused_dim: 258
   hidden_dims: [128, 64]
@@ -9,7 +9,11 @@ model:
   dropout: 0.3
 
 training:
-  batch_size: 16
+  # Trained end-to-end together with thermal_cnn by default (train.py) — the model
+  # is small enough post-BiLSTM-removal that joint training fits comfortably in 4GB VRAM.
+  # Set freeze_upstream: true only if you want to train the fusion head alone on top of
+  # an already-trained/frozen thermal_cnn checkpoint.
+  batch_size: 64
   epochs: 20
   lr: 0.0005
   weight_decay: 0.0001
@@ -17,11 +21,14 @@ training:
   scheduler: cosine
   mixed_precision: true
   checkpoint_dir: checkpoints/fusion
-  freeze_upstream: true       # freeze CNN + BiLSTM, train fusion head only
+  freeze_upstream: false
 
 class_names: [Disengaged, Neutral, Engaged]
 
 data:
   processed_dir: data/processed
   labels_dir: data/labels
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
   seed: 42
