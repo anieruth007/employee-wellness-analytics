@@ -15,9 +15,11 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, random_split
 
-from src.data.thermal_dataset import ThermalDataset
+from src.data.thermal_dataset import ThermalDataset, build_weighted_sampler, compute_class_weights
 from src.models.fusion_model import EngagementModel, FusionClassifier
 from src.models.thermal_cnn import ThermalCNNEncoder
+
+CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
 
 
 def load_config(path: str) -> dict:
@@ -44,11 +46,17 @@ def build_dataloaders(cnn_cfg: dict, fusion_cfg: dict):
     generator = torch.Generator().manual_seed(fusion_cfg["data"]["seed"])
     train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=generator)
 
+    # Disengaged is a minority class — oversample it in training via WeightedRandomSampler
+    # only (not also via a weighted loss, which would double-correct for imbalance).
+    # Val/test loaders stay unweighted for an honest evaluation signal.
+    class_weights = compute_class_weights([dataset.labels[i] for i in train_set.indices])
+    sampler = build_weighted_sampler(dataset.labels, train_set.indices)
+
     batch_size = cnn_cfg["training"]["batch_size"]
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0)
+    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, class_weights
 
 
 def run_epoch(model, loader, criterion, optimizer, device, train: bool):
@@ -80,7 +88,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    train_loader, val_loader, test_loader = build_dataloaders(cnn_cfg, fusion_cfg)
+    train_loader, val_loader, test_loader, class_weights = build_dataloaders(cnn_cfg, fusion_cfg)
+    print("Class weights (inverse frequency, applied to the WeightedRandomSampler only — "
+          "not also to the loss, to avoid double-correcting for imbalance):")
+    for name, weight in zip(CLASS_NAMES, class_weights.tolist()):
+        print(f"  {name}: {weight:.4f}")
 
     encoder = ThermalCNNEncoder(feature_dim=cnn_cfg["model"]["feature_dim"])
     classifier = FusionClassifier(

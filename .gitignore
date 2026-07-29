@@ -6,6 +6,7 @@ data/roi_temperatures/*
 data/labels/*
 !data/**/.gitkeep
 !data/labels/population_baseline.json
+!data/labels/engagement_labels.json
 
 checkpoints/*
 !checkpoints/.gitkeep
