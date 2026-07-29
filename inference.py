@@ -13,7 +13,7 @@ import yaml
 from src.data.preprocessing import normalize_to_grayscale, resize_for_cnn
 from src.models.fusion_model import EngagementModel, FusionClassifier
 from src.models.thermal_cnn import ThermalCNNEncoder
-from src.roi.extraction import LandmarkDetector, extract_roi_temperatures, load_roi_landmarks
+from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
 from src.roi.labeling import DEFAULT_BASELINE_PATH, ProxyThresholds, load_baseline, proxy_vector
 
 CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
@@ -65,17 +65,16 @@ def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/be
     temp_c = extract_flir_temperature(image_path)
     gray_full_res = normalize_to_grayscale(temp_c)
 
-    detector = LandmarkDetector()
-    landmarks = detector.detect(gray_full_res)
-    detector.close()
-    if landmarks is None:
-        raise RuntimeError("No face detected in the captured thermal image — retake the shot.")
+    pipeline = CascadeLandmarkPipeline()
+    result = pipeline.detect(gray_full_res)
+    pipeline.close()
+    if not result["success"]:
+        raise RuntimeError("No face detected in the captured thermal image (all cascade stages failed) — retake the shot.")
 
-    roi_landmarks = load_roi_landmarks()
     thresholds = ProxyThresholds.from_config()
     baseline = load_baseline(DEFAULT_BASELINE_PATH)
 
-    roi_temps = extract_roi_temperatures(temp_c, landmarks, roi_landmarks)
+    roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
     proxy = proxy_vector(roi_temps, baseline, thresholds)
 
     gray_48 = resize_for_cnn(gray_full_res, input_size)
@@ -98,6 +97,7 @@ def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/be
         "c_proxy": proxy[1],
         "roi_temps_c": roi_temps,
         "explanation": explain(label, proxy[0], proxy[1]),
+        "detector_used": result["detector_used"],
     }
 
 

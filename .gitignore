@@ -5,9 +5,14 @@ data/landmarks/*
 data/roi_temperatures/*
 data/labels/*
 !data/**/.gitkeep
+!data/labels/population_baseline.json
 
 checkpoints/*
 !checkpoints/.gitkeep
+
+# auto-downloaded MediaPipe model + OpenCV cascade XMLs, not authored here
+models/
+
 logs/*
 !logs/.gitkeep
 

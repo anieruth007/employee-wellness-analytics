@@ -56,18 +56,15 @@ def proxy_vector(roi_temps: dict, baseline: dict, thresholds: ProxyThresholds) -
 def synthesize_engagement_label(n_proxy: float, c_proxy: float) -> int:
     """Maps personality-proxy signals to a 3-way engagement label for supervised training
     (0=Disengaged, 1=Neutral, 2=Engaged), since Charlotte-ThermalFace has no ground-truth
-    engagement labels.
-
-    UNVALIDATED PLACEHOLDER: this specific N/C -> engagement mapping rule has not been
-    derived from or checked against the cited literature (Barrick & Mount 1991 establishes
-    N/C as predictors, not this exact rule). Treat trained results as provisional until this
-    rule is reviewed — it directly defines the training targets for the whole classifier.
+    engagement labels. This mapping rule is project-owner signed off (not derived from the
+    cited literature — Barrick & Mount 1991 establishes N/C as predictors, not this exact
+    rule) and defines the training targets for the whole classifier.
     """
     if n_proxy == 1 and c_proxy == 0:
-        return 0  # high stress marker + low sustained-attention marker
-    if n_proxy == 0 and c_proxy == 1:
-        return 2  # calm + high conscientiousness marker
-    return 1  # mixed/ambiguous signal
+        return 0  # Disengaged: high stress marker + low sustained-attention marker
+    if c_proxy == 1 and n_proxy == 0:
+        return 2  # Engaged: calm + high conscientiousness marker
+    return 1  # Neutral: all other combinations
 
 
 def compute_population_baseline(roi_temp_samples: List[dict]) -> dict:

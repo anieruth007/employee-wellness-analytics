@@ -13,7 +13,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from src.data.preprocessing import normalize_to_grayscale, raw_to_celsius, resize_for_cnn
-from src.roi.extraction import LandmarkDetector, extract_roi_temperatures, load_roi_landmarks
+from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
 from src.roi.labeling import (
     DEFAULT_BASELINE_PATH,
     ProxyThresholds,
@@ -49,13 +49,12 @@ class ThermalDataset(Dataset):
         self.input_size = input_size
         self.baseline = load_baseline(baseline_path or DEFAULT_BASELINE_PATH)
         self.thresholds = thresholds or ProxyThresholds.from_config()
-        self.roi_landmarks = load_roi_landmarks()
-        self._detector = None  # lazy: MediaPipe FaceMesh isn't picklable across DataLoader worker processes
+        self._pipeline = None  # lazy: not picklable across DataLoader worker processes
 
-    def _get_detector(self) -> LandmarkDetector:
-        if self._detector is None:
-            self._detector = LandmarkDetector()
-        return self._detector
+    def _get_pipeline(self) -> CascadeLandmarkPipeline:
+        if self._pipeline is None:
+            self._pipeline = CascadeLandmarkPipeline()
+        return self._pipeline
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -66,12 +65,13 @@ class ThermalDataset(Dataset):
         temp_c = raw_to_celsius(raw)
         gray_full_res = normalize_to_grayscale(temp_c)
 
-        landmarks = self._get_detector().detect(gray_full_res)
-        if landmarks is not None:
-            roi_temps = extract_roi_temperatures(temp_c, landmarks, self.roi_landmarks)
+        result = self._get_pipeline().detect(gray_full_res)
+        if result["success"]:
+            roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
             proxy = proxy_vector(roi_temps, self.baseline, self.thresholds)
         else:
-            # No face detected: fall back to a neutral proxy rather than dropping the sample
+            # No face detected by any cascade stage: fall back to a neutral proxy rather
+            # than dropping the sample.
             proxy = [0.0, 0.0]
 
         gray_48 = resize_for_cnn(gray_full_res, self.input_size)

@@ -58,15 +58,6 @@ Because the sequence/BiLSTM path is gone and the CNN input shrank to 48×48, the
 model is small enough to **train end-to-end in a single stage** on a 4GB-VRAM GPU — the
 earlier "train paths separately to manage VRAM" workaround is no longer needed.
 
-## Open item — needs your input
-
-`src/roi/labeling.py::synthesize_engagement_label` currently maps `[N_proxy, C_proxy]` to
-one of the 3 engagement classes with a placeholder rule (high N + low C → Disengaged, low
-N + high C → Engaged, else Neutral) purely so the pipeline runs end-to-end. This rule has
-**not** been derived from or validated against the cited literature and directly defines
-the training targets for the whole classifier — it needs your review before results are
-treated as anything more than a working scaffold.
-
 ## Project layout
 
 ```
