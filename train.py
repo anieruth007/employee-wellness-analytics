@@ -1,7 +1,8 @@
-"""Train the end-to-end thermal engagement model (CNN encoder + fusion classifier).
+"""Train the engagement classifier head on top of a FROZEN, room-temperature-pretrained
+ResNet18 backbone (see scripts/train_room_temp_backbone.py for the backbone pretraining
+stage, and src/models/resnet_backbone.py::load_frozen_backbone).
 
-BiLSTM removal means the model is small enough (48x48 input) to train jointly in a
-single stage on a 4GB-VRAM GPU — no separate CNN/fusion training stages needed.
+Only the classifier head's parameters are updated — the backbone never sees a gradient.
 
 Usage:
     python train.py
@@ -18,7 +19,7 @@ from torch.utils.data import DataLoader, random_split
 from src.data.preprocessing import TRAIN_TRANSFORM
 from src.data.thermal_dataset import ThermalDataset, build_weighted_sampler, compute_class_weights
 from src.models.fusion_model import EngagementModel, FusionClassifier
-from src.models.thermal_cnn import ThermalCNNEncoder
+from src.models.resnet_backbone import load_frozen_backbone
 from src.roi.labeling import CLASS_NAMES
 from src.training.scheduling import build_scheduler
 
@@ -75,13 +76,11 @@ def build_dataloaders(cnn_cfg: dict, fusion_cfg: dict):
 def run_epoch(model, loader, criterion, optimizer, device, train: bool):
     model.train(mode=train)
     total_loss, correct, total = 0.0, 0, 0
-    for images, _proxies, labels in loader:
-        # proxies deliberately unused here — see src/models/fusion_model.py docstring:
-        # feeding them to the classifier caused target leakage against the proxy-derived label.
-        images, labels = images.to(device), labels.to(device)
+    for images, roi_features, labels in loader:
+        images, roi_features, labels = images.to(device), roi_features.to(device), labels.to(device)
 
         with torch.set_grad_enabled(train):
-            logits = model(images)
+            logits = model(images, roi_features)
             loss = criterion(logits, labels)
             if train:
                 optimizer.zero_grad()
@@ -110,26 +109,34 @@ def main():
     for name, weight in zip(CLASS_NAMES, class_weights.tolist()):
         print(f"  {name}: {weight:.4f}")
 
-    encoder = ThermalCNNEncoder(feature_dim=cnn_cfg["model"]["feature_dim"])
+    backbone_checkpoint = fusion_cfg["training"]["backbone_checkpoint"]
+    encoder = load_frozen_backbone(backbone_checkpoint, device=device)
+    print(f"\nLoaded frozen backbone from {backbone_checkpoint} "
+          f"({sum(p.numel() for p in encoder.parameters())} params, all frozen)")
+
     classifier = FusionClassifier(
         expression_dim=fusion_cfg["model"]["expression_dim"],
+        roi_dim=fusion_cfg["model"]["roi_dim"],
         hidden_dims=tuple(fusion_cfg["model"]["hidden_dims"]),
         num_classes=fusion_cfg["model"]["num_classes"],
         dropout=fusion_cfg["model"]["dropout"],
     )
     model = EngagementModel(encoder, classifier).to(device)
 
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"Trainable params (classifier head only): {sum(p.numel() for p in trainable_params)}")
+
     # Training-loop hyperparameters (epochs, lr, scheduler, early stopping, batch_size)
-    # live in configs/cnn_config.yaml — the single authoritative source for this joint
-    # training loop. fusion_config.yaml's training section only holds fusion-specific
-    # fields (checkpoint_dir, freeze_upstream).
+    # live in configs/cnn_config.yaml — the single authoritative source for this training
+    # loop. fusion_config.yaml's training section only holds fusion-specific fields
+    # (checkpoint_dir, backbone_checkpoint).
     train_cfg = cnn_cfg["training"]
     total_epochs = train_cfg["epochs"]
     warmup_epochs = train_cfg.get("warmup_epochs", 0)
     patience = train_cfg["early_stopping_patience"]
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg["lr"], weight_decay=train_cfg["weight_decay"])
+    optimizer = torch.optim.AdamW(trainable_params, lr=train_cfg["lr"], weight_decay=train_cfg["weight_decay"])
     scheduler = build_scheduler(optimizer, total_epochs, warmup_epochs)
 
     checkpoint_dir = Path(fusion_cfg["training"]["checkpoint_dir"])
@@ -186,8 +193,8 @@ def main():
     model.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for images, _proxies, labels in test_loader:
-            logits = model(images.to(device))
+        for images, roi_features, labels in test_loader:
+            logits = model(images.to(device), roi_features.to(device))
             all_preds.extend(logits.argmax(dim=1).cpu().tolist())
             all_labels.extend(labels.tolist())
 

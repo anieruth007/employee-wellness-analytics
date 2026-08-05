@@ -13,9 +13,16 @@ from PIL import Image
 
 from src.data.preprocessing import EVAL_TRANSFORM, normalize_to_grayscale, resize_for_cnn
 from src.models.fusion_model import EngagementModel, FusionClassifier
-from src.models.thermal_cnn import ThermalCNNEncoder
+from src.models.resnet_backbone import load_frozen_backbone
 from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
-from src.roi.labeling import CLASS_NAMES, DEFAULT_BASELINE_PATH, ProxyThresholds, load_baseline, proxy_vector
+from src.roi.labeling import (
+    CLASS_NAMES,
+    DEFAULT_BASELINE_PATH,
+    ProxyThresholds,
+    load_baseline,
+    proxy_vector,
+    raw_temperature_vector,
+)
 
 
 def extract_flir_temperature(image_path: str) -> np.ndarray:
@@ -31,10 +38,11 @@ def extract_flir_temperature(image_path: str) -> np.ndarray:
     return fie.get_thermal_np().astype(np.float32)
 
 
-def load_model(cnn_cfg: dict, fusion_cfg: dict, checkpoint_path: str, device: torch.device) -> EngagementModel:
-    encoder = ThermalCNNEncoder(feature_dim=cnn_cfg["model"]["feature_dim"])
+def load_model(fusion_cfg: dict, checkpoint_path: str, device: torch.device) -> EngagementModel:
+    encoder = load_frozen_backbone(fusion_cfg["training"]["backbone_checkpoint"], device=device)
     classifier = FusionClassifier(
         expression_dim=fusion_cfg["model"]["expression_dim"],
+        roi_dim=fusion_cfg["model"]["roi_dim"],
         hidden_dims=tuple(fusion_cfg["model"]["hidden_dims"]),
         num_classes=fusion_cfg["model"]["num_classes"],
         dropout=fusion_cfg["model"]["dropout"],
@@ -52,13 +60,11 @@ def explain(label: str, n_proxy: float, c_proxy: float) -> str:
 
 
 def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/best_model.pt", input_size: int = 48) -> dict:
-    with open("configs/cnn_config.yaml") as f:
-        cnn_cfg = yaml.safe_load(f)
     with open("configs/fusion_config.yaml") as f:
         fusion_cfg = yaml.safe_load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(cnn_cfg, fusion_cfg, checkpoint_path, device)
+    model = load_model(fusion_cfg, checkpoint_path, device)
 
     temp_c = extract_flir_temperature(image_path)
     gray_full_res = normalize_to_grayscale(temp_c)
@@ -73,17 +79,21 @@ def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/be
     baseline = load_baseline(DEFAULT_BASELINE_PATH)
 
     roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
+    # proxy: binary N/C, used ONLY for the natural-language explanation below.
+    # roi_features: raw temps, the actual classifier input (see fusion_model.py docstring).
     proxy = proxy_vector(roi_temps, baseline, thresholds)
+    roi_features = raw_temperature_vector(roi_temps)
 
     gray_48 = resize_for_cnn(gray_full_res, input_size)
     # Same EVAL_TRANSFORM (ToTensor + Normalize, no augmentation) used for val/test during
     # training — must match exactly, or the model sees a different input distribution here
     # than it was trained/validated on.
     image_tensor = EVAL_TRANSFORM(Image.fromarray(gray_48, mode="L")).unsqueeze(0).to(device)
+    roi_features_tensor = torch.tensor([roi_features], dtype=torch.float32).to(device)
 
     with torch.no_grad():
         expression_vec = model.cnn_encoder(image_tensor)
-        probs = model.fusion_classifier.predict_proba(expression_vec)[0]
+        probs = model.fusion_classifier.predict_proba(expression_vec, roi_features_tensor)[0]
 
     pred_idx = int(probs.argmax())
     label = CLASS_NAMES[pred_idx]

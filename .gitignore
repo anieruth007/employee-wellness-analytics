@@ -13,8 +13,10 @@ data/labels/*
 checkpoints/*
 !checkpoints/.gitkeep
 
-# auto-downloaded MediaPipe model + OpenCV cascade XMLs, not authored here
-models/
+# auto-downloaded MediaPipe model + OpenCV cascade XMLs, not authored here.
+# Anchored to repo root (leading /) — an unanchored "models/" also matched src/models/,
+# which silently excluded resnet_backbone.py from ever being tracked. Caught before commit.
+/models/
 
 logs/*
 !logs/.gitkeep

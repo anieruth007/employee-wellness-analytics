@@ -76,8 +76,9 @@ def main(raw_dir: str, cache_path: Path) -> None:
             roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
             proxy = proxy_vector(roi_temps, baseline, thresholds)
         else:
-            # No face detected by any cascade stage: fall back to a neutral proxy,
-            # matching ThermalDataset's prior in-line fallback behavior.
+            # No face detected by any cascade stage: no real roi_temps exist. Fall back to
+            # a neutral proxy for the (unused, ThermalDataset excludes these) label field.
+            roi_temps = None
             proxy = [0.0, 0.0]
 
         label = synthesize_engagement_label(proxy[0], proxy[1])
@@ -85,6 +86,7 @@ def main(raw_dir: str, cache_path: Path) -> None:
         records.append(
             {
                 "path": str(path.relative_to(root)),
+                "roi_temps": roi_temps,
                 "proxy": proxy,
                 "label": label,
                 "detector_used": result["detector_used"],

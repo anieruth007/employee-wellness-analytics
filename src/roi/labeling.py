@@ -48,9 +48,34 @@ def compute_personality_proxy(roi_temps: dict, baseline: dict, thresholds: Proxy
 
 
 def proxy_vector(roi_temps: dict, baseline: dict, thresholds: ProxyThresholds) -> List[float]:
-    """[N_proxy, C_proxy] as floats, ready to feed into the fusion layer."""
+    """[N_proxy, C_proxy] as floats. Used ONLY for label synthesis (synthesize_engagement_label)
+    and the dashboard's personality-aware explanation text — NOT fed to the classifier
+    (see raw_temperature_vector, and fusion_model.py's module docstring for why: this
+    binary proxy directly determines the training label, so it caused ~100% accuracy via
+    target leakage when it was part of the classifier's input).
+    """
     n_proxy, c_proxy = compute_personality_proxy(roi_temps, baseline, thresholds)
     return [float(n_proxy), float(c_proxy)]
+
+
+def raw_temperature_vector(roi_temps: dict) -> List[float]:
+    """5-dim [nose_temp, forehead_temp, periorbital_temp, upper_lip_temp,
+    differential_index] — raw, un-thresholded ROI temperatures, fed to the fusion
+    classifier as its ROI-derived input (replacing the binary N/C proxy).
+
+    Less directly leaky than proxy_vector's binary output — these are a superset of
+    information the proxy is thresholded FROM, not the literal label-generating value —
+    but still correlated with the label, since the label is itself a threshold function of
+    these same quantities. Worth scrutinizing results with this in mind rather than
+    treating it as leakage-free.
+    """
+    return [
+        roi_temps["nose_tip"],
+        roi_temps["forehead"],
+        roi_temps["periorbital"],
+        roi_temps["upper_lip"],
+        differential_index(roi_temps),
+    ]
 
 
 CLASS_NAMES = ["Disengaged", "Burned Out", "Engaged"]

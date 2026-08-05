@@ -16,6 +16,7 @@ from PIL import Image
 from torch.utils.data import Dataset, WeightedRandomSampler
 
 from src.data.preprocessing import EVAL_TRANSFORM, normalize_to_grayscale, raw_to_celsius, resize_for_cnn
+from src.roi.labeling import raw_temperature_vector
 
 DEFAULT_LABELS_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "labels" / "engagement_labels.json"
 
@@ -110,11 +111,17 @@ class RoomTempDataset(Dataset):
 
 
 class ThermalDataset(Dataset):
-    """__getitem__ returns (image_tensor[1,48,48], proxy_tensor[2], label:int).
+    """__getitem__ returns (image_tensor[1,48,48], roi_features_tensor[5], label:int).
+
+    roi_features is the raw [nose_temp, forehead_temp, periorbital_temp, upper_lip_temp,
+    differential_index] vector (see src/roi/labeling.py::raw_temperature_vector) — NOT the
+    binary N/C proxy, which is still computed (self.proxies) for label synthesis and
+    dashboard explanations but is never fed to the classifier (target-leakage risk).
 
     Requires data/labels/engagement_labels.json to already exist — run
     `python scripts/precompute_labels_cache.py` once first (after
-    scripts/compute_population_baseline.py).
+    scripts/compute_population_baseline.py). Must be a cache version that includes
+    per-record "roi_temps" (raw ROI temperatures, not just the binary proxy).
     """
 
     def __init__(
@@ -156,8 +163,15 @@ class ThermalDataset(Dataset):
         detected = [r for r in records if r["detector_used"] != "none"]
         self.num_excluded = len(records) - len(detected)
 
+        if detected and "roi_temps" not in detected[0]:
+            raise RuntimeError(
+                f"{cache_path} predates raw ROI-temperature caching (no 'roi_temps' field) "
+                "— rerun scripts/precompute_labels_cache.py to regenerate it."
+            )
+
         self.samples: List[Path] = [self.root / r["path"] for r in detected]
         self.proxies: List[List[float]] = [r["proxy"] for r in detected]
+        self.roi_features: List[List[float]] = [raw_temperature_vector(r["roi_temps"]) for r in detected]
         self.labels: List[int] = [r["label"] for r in detected]
         if not self.samples:
             raise RuntimeError(f"No successfully-detected samples found in {cache_path}")
@@ -174,10 +188,10 @@ class ThermalDataset(Dataset):
         gray_48 = resize_for_cnn(gray_full_res, self.input_size)
         pil_image = Image.fromarray(gray_48, mode="L")
         image_tensor = self.transform(pil_image)
-        proxy_tensor = torch.tensor(self.proxies[idx], dtype=torch.float32)
+        roi_features_tensor = torch.tensor(self.roi_features[idx], dtype=torch.float32)
         label = self.labels[idx]
 
-        return image_tensor, proxy_tensor, label
+        return image_tensor, roi_features_tensor, label
 
 
 def compute_class_weights(labels: List[int], num_classes: int = 3) -> torch.Tensor:

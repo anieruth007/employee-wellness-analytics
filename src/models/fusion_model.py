@@ -1,31 +1,36 @@
-"""Classifier head — 256-dim CNN expression features -> 3-way engagement classifier.
+"""Classifier head — ResNet18 (frozen, room-temperature-pretrained) expression features
+[512-dim] + raw ROI temperature vector [5-dim] -> 3-way engagement classifier.
 
-The N/C personality-proxy vector is deliberately NOT fed into this classifier. The proxy
-is computed via a deterministic threshold rule on ROI temperatures, and
-synthesize_engagement_label() derives the training label from that exact same proxy —
-so if the proxy were also handed to the classifier as input, the model could hit ~100%
-accuracy by trivially inverting its own label-generation rule instead of learning
-anything from the thermal image (confirmed: an earlier run with proxy_dim=2 concatenated
-into this classifier hit val_acc=1.000 by epoch 4). The proxy still drives label
-synthesis and the dashboard's personality-aware explanation — just never model input.
+Reintroduces ROI-derived input into the classifier (previously removed entirely — see git
+history around "Fix class-imbalance handling" / target-leakage — when the input was the
+binary N/C proxy that directly determines the training label via
+synthesize_engagement_label(), causing ~100% accuracy through trivial label inversion).
+
+This time the classifier receives raw_temperature_vector()'s continuous ROI temperatures
+(nose/forehead/periorbital/lip + differential index) rather than the thresholded binary
+proxy. This is less directly leaky — these are a superset of information the binary proxy
+is thresholded FROM, not the literal label-generating value — but they're still
+correlated with the label, since the label is itself a threshold function of these same
+quantities. Worth scrutinizing results with this in mind, not treating it as leakage-free.
 """
 import torch
 import torch.nn as nn
 
 
 class FusionClassifier(nn.Module):
-    """(N, 256) expression features -> (N, 3) engagement logits.
+    """(N, 512) expression features + (N, 5) raw ROI temperatures -> (N, 3) engagement logits.
 
     Returns raw logits (no softmax) so training can use nn.CrossEntropyLoss directly —
     softmax is applied separately at inference time via `predict_proba`, to avoid a
     double-softmax when training with CrossEntropyLoss (which applies log-softmax internally).
     """
 
-    def __init__(self, expression_dim: int = 256, hidden_dims=(128, 64), num_classes: int = 3, dropout: float = 0.3):
+    def __init__(self, expression_dim: int = 512, roi_dim: int = 5, hidden_dims=(128, 64), num_classes: int = 3, dropout: float = 0.3):
         super().__init__()
+        fused_dim = expression_dim + roi_dim
         h1, h2 = hidden_dims
         self.net = nn.Sequential(
-            nn.Linear(expression_dim, h1),
+            nn.Linear(fused_dim, h1),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(h1, h2),
@@ -34,18 +39,27 @@ class FusionClassifier(nn.Module):
             nn.Linear(h2, num_classes),
         )
 
-    def forward(self, expression_vec: torch.Tensor) -> torch.Tensor:
-        return self.net(expression_vec)
+    def forward(self, expression_vec: torch.Tensor, roi_features: torch.Tensor) -> torch.Tensor:
+        fused = torch.cat([expression_vec, roi_features], dim=1)
+        return self.net(fused)
 
     @torch.no_grad()
-    def predict_proba(self, expression_vec: torch.Tensor) -> torch.Tensor:
-        logits = self.forward(expression_vec)
+    def predict_proba(self, expression_vec: torch.Tensor, roi_features: torch.Tensor) -> torch.Tensor:
+        logits = self.forward(expression_vec, roi_features)
         return torch.softmax(logits, dim=1)
 
 
 class EngagementModel(nn.Module):
-    """End-to-end wrapper: thermal image -> engagement logits. Proxy is not part of the
-    model at all — it's computed separately (see src/roi/) for labeling and explanation.
+    """End-to-end wrapper: thermal image + raw ROI temperature vector -> engagement logits.
+
+    `cnn_encoder` (the ResNet18 backbone, see src/models/resnet_backbone.py::load_frozen_backbone)
+    is expected to be frozen (requires_grad=False on all its params). Its forward pass runs
+    under torch.no_grad() here regardless, and the train()/eval() override below keeps it
+    pinned in eval() mode even when the overall model is in train() mode for the
+    classifier head — without this, BatchNorm layers inside the backbone would keep
+    updating their running statistics from new data despite being "frozen" (requires_grad
+    only blocks gradient updates to the affine parameters, not BatchNorm's running-stat
+    tracking, which happens unconditionally in train mode).
     """
 
     def __init__(self, cnn_encoder: nn.Module, fusion_classifier: FusionClassifier):
@@ -53,6 +67,12 @@ class EngagementModel(nn.Module):
         self.cnn_encoder = cnn_encoder
         self.fusion_classifier = fusion_classifier
 
-    def forward(self, image: torch.Tensor) -> torch.Tensor:
-        expression_vec = self.cnn_encoder(image)
-        return self.fusion_classifier(expression_vec)
+    def forward(self, image: torch.Tensor, roi_features: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            expression_vec = self.cnn_encoder(image)
+        return self.fusion_classifier(expression_vec, roi_features)
+
+    def train(self, mode: bool = True) -> "EngagementModel":
+        super().train(mode)
+        self.cnn_encoder.eval()  # frozen backbone always stays in eval mode
+        return self
