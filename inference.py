@@ -9,14 +9,13 @@ import argparse
 import numpy as np
 import torch
 import yaml
+from PIL import Image
 
-from src.data.preprocessing import normalize_to_grayscale, resize_for_cnn
+from src.data.preprocessing import EVAL_TRANSFORM, normalize_to_grayscale, resize_for_cnn
 from src.models.fusion_model import EngagementModel, FusionClassifier
 from src.models.thermal_cnn import ThermalCNNEncoder
 from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
-from src.roi.labeling import DEFAULT_BASELINE_PATH, ProxyThresholds, load_baseline, proxy_vector
-
-CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
+from src.roi.labeling import CLASS_NAMES, DEFAULT_BASELINE_PATH, ProxyThresholds, load_baseline, proxy_vector
 
 
 def extract_flir_temperature(image_path: str) -> np.ndarray:
@@ -36,7 +35,6 @@ def load_model(cnn_cfg: dict, fusion_cfg: dict, checkpoint_path: str, device: to
     encoder = ThermalCNNEncoder(feature_dim=cnn_cfg["model"]["feature_dim"])
     classifier = FusionClassifier(
         expression_dim=fusion_cfg["model"]["expression_dim"],
-        proxy_dim=fusion_cfg["model"]["proxy_dim"],
         hidden_dims=tuple(fusion_cfg["model"]["hidden_dims"]),
         num_classes=fusion_cfg["model"]["num_classes"],
         dropout=fusion_cfg["model"]["dropout"],
@@ -78,20 +76,25 @@ def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/be
     proxy = proxy_vector(roi_temps, baseline, thresholds)
 
     gray_48 = resize_for_cnn(gray_full_res, input_size)
-    image_tensor = torch.from_numpy(gray_48).float().unsqueeze(0).unsqueeze(0).to(device) / 255.0
-    proxy_tensor = torch.tensor([proxy], dtype=torch.float32).to(device)
+    # Same EVAL_TRANSFORM (ToTensor + Normalize, no augmentation) used for val/test during
+    # training — must match exactly, or the model sees a different input distribution here
+    # than it was trained/validated on.
+    image_tensor = EVAL_TRANSFORM(Image.fromarray(gray_48, mode="L")).unsqueeze(0).to(device)
 
     with torch.no_grad():
         expression_vec = model.cnn_encoder(image_tensor)
-        probs = model.fusion_classifier.predict_proba(expression_vec, proxy_tensor)[0]
+        probs = model.fusion_classifier.predict_proba(expression_vec)[0]
 
     pred_idx = int(probs.argmax())
     label = CLASS_NAMES[pred_idx]
-    wellness_score = float(probs[0])  # P(Disengaged): 0.0 = fully engaged, 1.0 = fully disengaged
+    # P(Disengaged) only — "Burned Out" is also a concerning state this doesn't capture.
+    # Left as-is (matches the original single-scalar wellness score design); revisit if a
+    # wellness score that reflects both concerning classes is wanted.
+    wellness_score = float(probs[0])
 
     return {
         "engagement": label,
-        "probabilities": {CLASS_NAMES[i]: float(probs[i]) for i in range(3)},
+        "probabilities": {CLASS_NAMES[i]: float(probs[i]) for i in range(len(CLASS_NAMES))},
         "wellness_score": wellness_score,
         "n_proxy": proxy[0],
         "c_proxy": proxy[1],

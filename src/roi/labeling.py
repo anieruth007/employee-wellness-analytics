@@ -53,18 +53,38 @@ def proxy_vector(roi_temps: dict, baseline: dict, thresholds: ProxyThresholds) -
     return [float(n_proxy), float(c_proxy)]
 
 
+CLASS_NAMES = ["Disengaged", "Burned Out", "Engaged"]
+
+
 def synthesize_engagement_label(n_proxy: float, c_proxy: float) -> int:
-    """Maps personality-proxy signals to a 3-way engagement label for supervised training
-    (0=Disengaged, 1=Neutral, 2=Engaged), since Charlotte-ThermalFace has no ground-truth
-    engagement labels. This mapping rule is project-owner signed off (not derived from the
-    cited literature — Barrick & Mount 1991 establishes N/C as predictors, not this exact
-    rule) and defines the training targets for the whole classifier.
+    """Maps personality-proxy signals to a 3-way engagement label for supervised training,
+    since Charlotte-ThermalFace has no ground-truth engagement labels. Grounded in
+    Barrick & Mount (1991): Conscientiousness is the stronger, more direct predictor of
+    engagement/performance than Neuroticism, so C is the primary split and N only
+    distinguishes within the "high C" branch.
+
+      0 = Disengaged (C=0, any N): low sustained-attention marker dominates regardless of
+          stress state — (N=1,C=0) and (N=0,C=0) are merged because both present as
+          disengaged; the defining signal is the absence of Conscientiousness, not N.
+      1 = Burned Out (N=1, C=1): high stress marker BUT still high sustained-attention —
+          pushing through despite strain. Kept as its own class (not merged into
+          Disengaged or Engaged) since it's a physiologically and practically distinct,
+          high-retention-risk state despite outwardly "engaged" behavior.
+      2 = Engaged (N=0, C=1): calm and focused — the intended target state.
+
+    Second iteration of this rule (project-owner signed off, not itself derived from the
+    cited literature). The prior 4-class version (Disengaged / Checked Out / Burned Out /
+    Engaged) split C=0 into two classes by N; collapsing them back here is a deliberate
+    redesign choice, not a reversion of the earlier fix that removed the old *3-class*
+    "Neutral" catch-all (which conflated Checked-Out and Burned-Out under one label) —
+    this new Disengaged class conflates Checked-Out and (low-C) Disengaged instead, which
+    is a different, intentional merge.
     """
-    if n_proxy == 1 and c_proxy == 0:
-        return 0  # Disengaged: high stress marker + low sustained-attention marker
-    if c_proxy == 1 and n_proxy == 0:
-        return 2  # Engaged: calm + high conscientiousness marker
-    return 1  # Neutral: all other combinations
+    if c_proxy == 0:
+        return 0  # Disengaged (low C, regardless of N)
+    if n_proxy == 1 and c_proxy == 1:
+        return 1  # Burned Out
+    return 2  # Engaged (n_proxy == 0 and c_proxy == 1)
 
 
 def compute_population_baseline(roi_temp_samples: List[dict]) -> dict:

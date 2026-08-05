@@ -16,8 +16,7 @@ from torch.utils.data import random_split
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.thermal_dataset import ThermalDataset, build_weighted_sampler, compute_class_weights
-
-CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
+from src.roi.labeling import CLASS_NAMES
 
 
 def main():
@@ -47,12 +46,13 @@ def main():
         c = raw_counts.get(i, 0)
         print(f"  {name}: {c} ({c / len(train_indices):.1%})")
 
-    class_weights = compute_class_weights([dataset.labels[i] for i in train_indices])
+    num_classes = fusion_cfg["model"]["num_classes"]
+    class_weights = compute_class_weights([dataset.labels[i] for i in train_indices], num_classes=num_classes)
     print("\nComputed class weights (inverse frequency, N / (num_classes * count)):")
     for i, name in enumerate(CLASS_NAMES):
         print(f"  {name}: {class_weights[i]:.4f}")
 
-    sampler = build_weighted_sampler(dataset.labels, train_indices)
+    sampler = build_weighted_sampler(dataset.labels, train_indices, num_classes=num_classes)
     # Sampler yields positions WITHIN the subset (0..len(train_indices)-1), not absolute
     # dataset indices — map back through train_indices before looking up labels.
     drawn_relative = list(sampler)

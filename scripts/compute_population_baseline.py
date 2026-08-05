@@ -3,9 +3,9 @@ threshold rules (mean nose_tip/forehead/periorbital/upper_lip temps across a sam
 thermal frames). Must be run once before ThermalDataset can be used, since __getitem__
 loads this baseline file on init.
 
-Also reports the resulting 3-way engagement label distribution (Disengaged/Neutral/Engaged)
-that synthesize_engagement_label() would assign to the same sample using this baseline —
-reusing the already-extracted ROI temps rather than re-running detection.
+Also reports the resulting engagement label distribution that synthesize_engagement_label()
+would assign to the same sample using this baseline — reusing the already-extracted ROI
+temps rather than re-running detection.
 
 Usage:
     python scripts/compute_population_baseline.py --sample-size 1000
@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.preprocessing import normalize_to_grayscale, raw_to_celsius
 from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
 from src.roi.labeling import (
+    CLASS_NAMES,
     ProxyThresholds,
     compute_population_baseline,
     proxy_vector,
@@ -32,7 +33,6 @@ from src.roi.labeling import (
     synthesize_engagement_label,
 )
 
-CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
 DETECTOR_NAMES = ["mediapipe", "haar_default", "lbp", "none"]
 
 

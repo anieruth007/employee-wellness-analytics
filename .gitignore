@@ -1,5 +1,7 @@
 # Data & artifacts
 data/raw/*
+# (data/raw/FLIR_E8_collected/ — real employee thermal captures — already covered by the
+# data/raw/* rule above; called out explicitly since it holds identifiable personal data.)
 data/processed/*
 data/landmarks/*
 data/roi_temperatures/*

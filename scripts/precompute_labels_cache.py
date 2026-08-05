@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.preprocessing import normalize_to_grayscale, raw_to_celsius
 from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
 from src.roi.labeling import (
+    CLASS_NAMES,
     DEFAULT_BASELINE_PATH,
     ProxyThresholds,
     load_baseline,
@@ -35,7 +36,6 @@ from src.roi.labeling import (
     synthesize_engagement_label,
 )
 
-CLASS_NAMES = ["Disengaged", "Neutral", "Engaged"]
 DETECTOR_NAMES = ["mediapipe", "haar_default", "lbp", "none"]
 DEFAULT_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "labels" / "engagement_labels.json"
 
@@ -106,7 +106,9 @@ def main(raw_dir: str, cache_path: Path) -> None:
     for name in DETECTOR_NAMES:
         count = detector_counts.get(name, 0)
         print(f"  {name}: {count} ({count / total:.1%})")
-    print("\nLabel distribution (undetected frames fall back to Neutral proxy [0,0]):")
+    print(f"\nLabel distribution (undetected frames fall back to a [0,0] proxy -> "
+          f"'{CLASS_NAMES[synthesize_engagement_label(0.0, 0.0)]}'; ThermalDataset excludes "
+          f"these entirely, see thermal_dataset.py):")
     for name in CLASS_NAMES:
         count = label_counts.get(name, 0)
         print(f"  {name}: {count} ({count / total:.1%})")

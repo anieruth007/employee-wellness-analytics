@@ -15,12 +15,16 @@ model:
 training:
   # Model is small (48x48 input, ~4 conv blocks) — comfortably fits on 4GB VRAM even
   # trained jointly with the fusion head in one pass; no separate-stage VRAM workaround needed.
+  # Authoritative source for train.py's joint training loop (fusion_config.yaml's
+  # training section only holds fusion-specific fields: checkpoint_dir, freeze_upstream).
   batch_size: 64
-  epochs: 30
-  lr: 0.0003
+  epochs: 100
+  lr: 0.0001
   weight_decay: 0.0001
   optimizer: adamw
-  scheduler: cosine
+  scheduler: cosine_with_warmup
+  warmup_epochs: 5
+  early_stopping_patience: 15   # stop if val_loss hasn't improved in this many consecutive epochs
   mixed_precision: true
   num_workers: 4
   checkpoint_dir: checkpoints/cnn

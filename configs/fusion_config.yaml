@@ -1,11 +1,12 @@
-# Fusion layer + 3-way engagement classifier
+# Classifier head on top of thermal_cnn's expression features.
+# N/C proxy is NOT part of this classifier's input — see src/models/fusion_model.py's
+# module docstring for why (feeding the proxy in caused ~100% accuracy via target leakage,
+# since synthesize_engagement_label() derives the training label from that same proxy).
 model:
   name: fusion_classifier
   expression_dim: 256         # from thermal_cnn, single-image feature vector
-  proxy_dim: 2                # [N_proxy, C_proxy] from src/roi
-  fused_dim: 258
   hidden_dims: [128, 64]
-  num_classes: 3              # Disengaged, Neutral, Engaged
+  num_classes: 3              # Disengaged, Burned Out, Engaged (see src/roi/labeling.py)
   dropout: 0.3
 
 training:
@@ -13,17 +14,14 @@ training:
   # is small enough post-BiLSTM-removal that joint training fits comfortably in 4GB VRAM.
   # Set freeze_upstream: true only if you want to train the fusion head alone on top of
   # an already-trained/frozen thermal_cnn checkpoint.
-  batch_size: 64
-  epochs: 20
-  lr: 0.0005
-  weight_decay: 0.0001
-  optimizer: adamw
-  scheduler: cosine
-  mixed_precision: true
+  # All other training-loop hyperparameters (epochs, lr, scheduler, batch_size, early
+  # stopping, ...) live in configs/cnn_config.yaml's training section — one authoritative
+  # source for the joint single-stage training loop, since this classifier head is always
+  # trained together with thermal_cnn, never separately.
   checkpoint_dir: checkpoints/fusion
   freeze_upstream: false
 
-class_names: [Disengaged, Neutral, Engaged]
+class_names: [Disengaged, "Burned Out", Engaged]
 
 data:
   processed_dir: data/processed

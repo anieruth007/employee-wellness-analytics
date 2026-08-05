@@ -45,11 +45,21 @@ calibration — there's no time for that in a single-shot attendance capture):
 - Forehead elevation > 0.3°C from baseline → High C proxy
 → 2-dim personality proxy vector `[N_proxy, C_proxy]`.
 
-**Fusion** (`src/models/fusion_model.py`)
-`concat(256 + 2) = 258` → FC(258→128) → ReLU → Dropout(0.3) → FC(128→64) → ReLU →
-Dropout(0.3) → FC(64→3) → `P(Disengaged), P(Neutral), P(Engaged)`. The model returns raw
-logits from `forward()` (for `CrossEntropyLoss` during training) and applies softmax only
-in `predict_proba()` at inference — this avoids a double-softmax bug.
+**Classifier head** (`src/models/fusion_model.py`)
+256-dim expression features (from `thermal_cnn`, NOT concatenated with the N/C proxy —
+see below) → FC(256→128) → ReLU → Dropout(0.3) → FC(128→64) → ReLU → Dropout(0.3) →
+FC(64→3) → `P(Disengaged), P(Neutral), P(Engaged)`. The model returns raw logits from
+`forward()` (for `CrossEntropyLoss` during training) and applies softmax only in
+`predict_proba()` at inference — this avoids a double-softmax bug.
+
+**Why the proxy isn't fed into the classifier**: the original design concatenated the
+256-dim expression vector with the 2-dim `[N_proxy, C_proxy]` before the classifier head.
+But `synthesize_engagement_label()` derives the training label from that exact same
+proxy — so a classifier that also receives the proxy as input can hit ~100% accuracy by
+trivially inverting its own label-generation rule instead of learning anything from the
+thermal image. Confirmed empirically: an end-to-end run with the proxy concatenated in
+hit val_acc=1.000 by epoch 4. The proxy still drives label synthesis and the dashboard's
+personality-aware explanation — it's just never handed to the classifier.
 
 **Output**: engagement class, wellness score (0-1, `P(Disengaged)`), N/C proxy values,
 personality-aware natural-language explanation, on-device Streamlit dashboard.
