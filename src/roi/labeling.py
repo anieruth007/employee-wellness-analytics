@@ -47,6 +47,87 @@ def compute_personality_proxy(roi_temps: dict, baseline: dict, thresholds: Proxy
     return n_proxy, c_proxy
 
 
+def ambient_normalized_roi_temps(roi_temps: dict, ambient_temp: float) -> dict:
+    """Each ROI temperature expressed as a delta above the image's own ambient
+    (background) reference — see src/roi/extraction.py::compute_ambient_temperature.
+    """
+    return {roi: temp - ambient_temp for roi, temp in roi_temps.items()}
+
+
+AMBIENT_THRESHOLDS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "ambient_thresholds.yaml"
+
+
+@dataclass
+class AmbientProxyThresholds:
+    """Direct cutoff values on ambient-normalized deltas — NOT a magnitude-to-negate like
+    ProxyThresholds. ProxyThresholds' fields (e.g. nose_tip_drop_c=0.5) were calibrated for
+    skin-vs-population-average-skin comparisons (both ~33-34C, so naturally small, ~0-3C
+    deltas). Ambient-normalized deltas (skin-vs-room-background) are structurally larger
+    positive numbers (~0-15C, since skin is always warmer than the room) — reusing the old
+    "0.5C magnitude below baseline" convention against this differently-scaled quantity
+    makes the threshold condition nearly always-false or always-true (see the smoke-test
+    finding that motivated this class). These fields are the actual cutoff value the
+    normalized delta is compared against, empirically derived from the Charlotte-ThermalFace
+    population's own ambient-normalized distribution — see scripts/derive_ambient_thresholds.py.
+    """
+
+    nose_delta_cutoff_c: float
+    forehead_delta_cutoff_c: float
+    differential_cutoff_c: float
+
+    @classmethod
+    def from_config(cls, config_path: Path = AMBIENT_THRESHOLDS_CONFIG_PATH) -> "AmbientProxyThresholds":
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        return cls(**config["thresholds"])
+
+
+def compute_personality_proxy_ambient(roi_temps: dict, ambient_temp: float, thresholds: AmbientProxyThresholds) -> tuple:
+    """Ambient-normalized variant of compute_personality_proxy — compares ROI temperatures
+    against this image's own background temperature instead of the fixed population
+    baseline, to avoid confusing "cold capture room" with "physiological stress response"
+    (both produce a cold-nose/warm-forehead pattern relative to an absolute population
+    reference; normalizing against in-image ambient is meant to separate them).
+
+    NOTE: differential_index(roi_temps) = nose_tip - periorbital is unaffected by ambient
+    normalization — ambient cancels algebraically: (nose-ambient) - (periorbital-ambient)
+    = nose - periorbital, identical to the unnormalized value. Flagged here since it's a
+    real, non-obvious consequence of the normalization, not an oversight.
+    """
+    normalized = ambient_normalized_roi_temps(roi_temps, ambient_temp)
+    nose_delta = normalized["nose_tip"]
+    forehead_delta = normalized["forehead"]
+    diff_idx = differential_index(roi_temps)  # ambient-invariant, see docstring above
+
+    n_proxy = 1 if (nose_delta < thresholds.nose_delta_cutoff_c or diff_idx < thresholds.differential_cutoff_c) else 0
+    c_proxy = 1 if forehead_delta > thresholds.forehead_delta_cutoff_c else 0
+    return n_proxy, c_proxy
+
+
+def proxy_vector_ambient(roi_temps: dict, ambient_temp: float, thresholds: AmbientProxyThresholds) -> List[float]:
+    """[N_proxy, C_proxy] using ambient-normalized thresholding (see compute_personality_proxy_ambient)."""
+    n_proxy, c_proxy = compute_personality_proxy_ambient(roi_temps, ambient_temp, thresholds)
+    return [float(n_proxy), float(c_proxy)]
+
+
+def ambient_normalized_temperature_vector(roi_temps: dict, ambient_temp: float) -> List[float]:
+    """5-dim [nose_delta, forehead_delta, periorbital_delta, upper_lip_delta, differential]
+    — each ROI temperature expressed relative to this image's own ambient (background)
+    reference, replacing raw_temperature_vector as the fusion classifier's ROI-derived
+    input. `differential = nose_delta - periorbital_delta`, algebraically identical to the
+    unnormalized differential_index(roi_temps) since ambient cancels — computed via the
+    normalized values here anyway, per spec, for directness/symmetry with the other deltas.
+    """
+    normalized = ambient_normalized_roi_temps(roi_temps, ambient_temp)
+    return [
+        normalized["nose_tip"],
+        normalized["forehead"],
+        normalized["periorbital"],
+        normalized["upper_lip"],
+        normalized["nose_tip"] - normalized["periorbital"],
+    ]
+
+
 def proxy_vector(roi_temps: dict, baseline: dict, thresholds: ProxyThresholds) -> List[float]:
     """[N_proxy, C_proxy] as floats. Used ONLY for label synthesis (synthesize_engagement_label)
     and the dashboard's personality-aware explanation text — NOT fed to the classifier

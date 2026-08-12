@@ -1,0 +1,7 @@
+derivation: "mean-1std (nose, differential), mean+1std (forehead), from Charlotte-ThermalFace's\
+  \ own ambient-normalized distribution \u2014 see scripts/derive_ambient_thresholds.py"
+n_images: 6640
+thresholds:
+  differential_cutoff_c: -1.429268991352564
+  forehead_delta_cutoff_c: 9.268548619078011
+  nose_delta_cutoff_c: 5.7130239297321594

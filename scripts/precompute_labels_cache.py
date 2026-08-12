@@ -1,5 +1,5 @@
-"""Precompute per-image ROI proxy vectors + engagement labels for the full dataset and
-cache them to data/labels/engagement_labels.json, in the same sample order
+"""Precompute per-image ambient-normalized ROI vectors + engagement labels for the full
+dataset and cache them to data/labels/engagement_labels.json, in the same sample order
 src/data/thermal_dataset.py's _index_samples() produces.
 
 Why this exists: WeightedRandomSampler needs to know every training-sample's label
@@ -8,8 +8,15 @@ epoch) would make training impractically slow — the full-dataset cascade pass 
 close to 15 minutes on its own. This script pays that cost once; ThermalDataset then
 just loads the cached result.
 
+Labels are now synthesized via ambient-normalized thresholding (compare ROI temps against
+this image's own background/non-face pixels, not a fixed population baseline) — see
+src/roi/labeling.py::compute_personality_proxy_ambient. The old population-baseline-based
+proxy/label is also computed and cached (as *_baseline fields) purely for before/after
+comparison; nothing downstream reads them.
+
 Must be run after scripts/compute_population_baseline.py (needs
-data/labels/population_baseline.json to already exist).
+data/labels/population_baseline.json to already exist — used only for the comparison
+fields now, not for the actual labels).
 
 Usage:
     python scripts/precompute_labels_cache.py
@@ -26,13 +33,16 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.preprocessing import normalize_to_grayscale, raw_to_celsius
-from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
+from src.roi.extraction import CascadeLandmarkPipeline, compute_ambient_temperature, extract_roi_temperatures
 from src.roi.labeling import (
     CLASS_NAMES,
+    AmbientProxyThresholds,
     DEFAULT_BASELINE_PATH,
     ProxyThresholds,
+    ambient_normalized_temperature_vector,
     load_baseline,
     proxy_vector,
+    proxy_vector_ambient,
     synthesize_engagement_label,
 )
 
@@ -64,6 +74,7 @@ def main(raw_dir: str, cache_path: Path) -> None:
 
     records = []
     label_counts = Counter()
+    label_counts_baseline = Counter()
     detector_counts = Counter()
     for i, path in enumerate(samples):
         raw = np.array(Image.open(path))
@@ -74,21 +85,33 @@ def main(raw_dir: str, cache_path: Path) -> None:
         detector_counts[result["detector_used"]] += 1
         if result["success"]:
             roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
-            proxy = proxy_vector(roi_temps, baseline, thresholds)
+            ambient_temp = compute_ambient_temperature(temp_c, result["bbox"])
+            normalized_roi = ambient_normalized_temperature_vector(roi_temps, ambient_temp)
+            proxy = proxy_vector_ambient(roi_temps, ambient_temp, thresholds)
+            proxy_baseline = proxy_vector(roi_temps, baseline, thresholds)  # old method, comparison only
         else:
             # No face detected by any cascade stage: no real roi_temps exist. Fall back to
             # a neutral proxy for the (unused, ThermalDataset excludes these) label field.
             roi_temps = None
+            ambient_temp = None
+            normalized_roi = None
             proxy = [0.0, 0.0]
+            proxy_baseline = [0.0, 0.0]
 
         label = synthesize_engagement_label(proxy[0], proxy[1])
+        label_baseline = synthesize_engagement_label(proxy_baseline[0], proxy_baseline[1])
         label_counts[CLASS_NAMES[label]] += 1
+        label_counts_baseline[CLASS_NAMES[label_baseline]] += 1
         records.append(
             {
                 "path": str(path.relative_to(root)),
                 "roi_temps": roi_temps,
+                "ambient_temp": ambient_temp,
+                "normalized_roi": normalized_roi,
                 "proxy": proxy,
                 "label": label,
+                "proxy_baseline": proxy_baseline,
+                "label_baseline": label_baseline,
                 "detector_used": result["detector_used"],
             }
         )
@@ -108,11 +131,15 @@ def main(raw_dir: str, cache_path: Path) -> None:
     for name in DETECTOR_NAMES:
         count = detector_counts.get(name, 0)
         print(f"  {name}: {count} ({count / total:.1%})")
-    print(f"\nLabel distribution (undetected frames fall back to a [0,0] proxy -> "
-          f"'{CLASS_NAMES[synthesize_engagement_label(0.0, 0.0)]}'; ThermalDataset excludes "
-          f"these entirely, see thermal_dataset.py):")
+
+    print(f"\nLabel distribution — AMBIENT-NORMALIZED (new, actually used):")
     for name in CLASS_NAMES:
         count = label_counts.get(name, 0)
+        print(f"  {name}: {count} ({count / total:.1%})")
+
+    print(f"\nLabel distribution — POPULATION BASELINE (old, comparison only):")
+    for name in CLASS_NAMES:
+        count = label_counts_baseline.get(name, 0)
         print(f"  {name}: {count} ({count / total:.1%})")
 
 

@@ -1,36 +1,55 @@
-"""Single-image inference: one FLIR E8 thermal capture -> engagement classification,
-wellness score, N/C personality proxy, and a natural-language explanation.
+"""Single-image inference: one thermal capture -> Stress Index, Cognitive Load Index,
+Wellness Score, and Measurement Confidence — all continuous 0-100 scores, no
+classification labels (see project v2.0.docx: the project was reframed from an engagement
+classifier to a continuous physiological monitoring system).
+
+Accepts two source formats:
+  - FLIR E8 radiometric JPEG (.jpg/.jpeg) -> via flirimageextractor (production path)
+  - Charlotte-ThermalFace-style raw 16-bit TIFF (.tiff/.tif) -> direct calibration (test/
+    demo path — useful before/without a physical FLIR E8 camera)
 
 Usage:
     python inference.py path/to/flir_capture.jpg
+    python inference.py path/to/sample.tiff
 """
 import argparse
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
 from PIL import Image
 
-from src.data.preprocessing import EVAL_TRANSFORM, normalize_to_grayscale, resize_for_cnn
-from src.models.fusion_model import EngagementModel, FusionClassifier
+from src.data.preprocessing import EVAL_TRANSFORM, normalize_to_grayscale, raw_to_celsius, resize_for_cnn
 from src.models.resnet_backbone import load_frozen_backbone
-from src.roi.extraction import CascadeLandmarkPipeline, extract_roi_temperatures
-from src.roi.labeling import (
-    CLASS_NAMES,
-    DEFAULT_BASELINE_PATH,
-    ProxyThresholds,
-    load_baseline,
-    proxy_vector,
-    raw_temperature_vector,
-)
+from src.roi.extraction import CascadeLandmarkPipeline, compute_ambient_temperature, extract_roi_temperatures
+from src.roi.labeling import ambient_normalized_roi_temps
+from src.scoring.cognitive_load_index import compute_cognitive_load_index
+from src.scoring.confidence_score import compute_confidence_score, load_population_mean_features
+from src.scoring.stress_index import compute_stress_index
+from src.scoring.wellness_score import compute_wellness_score
+
+RESEARCH_GROUNDING = {
+    "stress_basis": "Fernandez et al. (2024, Anxiety Stress & Coping) - nose tip temperature "
+                     "as a stress index; Gioia et al. (2023, Sensors) - differential index as "
+                     "an autonomic marker.",
+    "cognitive_basis": "Forehead thermal elevation under cognitive load - Frontiers in "
+                        "Psychiatry (2025).",
+}
 
 
-def extract_flir_temperature(image_path: str) -> np.ndarray:
-    """Extract the raw per-pixel Celsius temperature array from a FLIR E8 radiometric JPEG.
+def extract_temperature_array(image_path: str) -> np.ndarray:
+    """Raw per-pixel Celsius temperature array from a thermal image file.
 
-    NOTE: verify `process_image`/`get_thermal_np` against your installed flirimageextractor
-    version's README — method names have varied slightly across releases of this package.
+    NOTE (FLIR path): verify `process_image`/`get_thermal_np` against your installed
+    flirimageextractor version's README — method names have varied slightly across
+    releases of this package.
     """
+    suffix = Path(image_path).suffix.lower()
+    if suffix in (".tiff", ".tif"):
+        raw = np.array(Image.open(image_path))
+        return raw_to_celsius(raw)
+
     from flirimageextractor import FlirImageExtractor  # heavy optional dep, lazy import
 
     fie = FlirImageExtractor()
@@ -38,35 +57,81 @@ def extract_flir_temperature(image_path: str) -> np.ndarray:
     return fie.get_thermal_np().astype(np.float32)
 
 
-def load_model(fusion_cfg: dict, checkpoint_path: str, device: torch.device) -> EngagementModel:
-    encoder = load_frozen_backbone(fusion_cfg["training"]["backbone_checkpoint"], device=device)
-    classifier = FusionClassifier(
-        expression_dim=fusion_cfg["model"]["expression_dim"],
-        roi_dim=fusion_cfg["model"]["roi_dim"],
-        hidden_dims=tuple(fusion_cfg["model"]["hidden_dims"]),
-        num_classes=fusion_cfg["model"]["num_classes"],
-        dropout=fusion_cfg["model"]["dropout"],
-    )
-    model = EngagementModel(encoder, classifier).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    model.eval()
-    return model
+def _stress_level(stress_index: float) -> str:
+    """Bin boundaries are a design choice (not specified in the reframe doc) — evenly
+    split 0-100 into quartiles. Easy to retune once real capture data gives a feel for
+    where meaningful cutoffs actually are.
+    """
+    if stress_index < 25:
+        return "Low"
+    if stress_index < 50:
+        return "Moderate"
+    if stress_index < 75:
+        return "Elevated"
+    return "High"
 
 
-def explain(label: str, n_proxy: float, c_proxy: float) -> str:
-    n_desc = "Elevated stress markers detected (High N proxy)" if n_proxy >= 0.5 else "Stable physiological markers (Low N proxy)"
-    c_desc = "reduced cognitive engagement (Low C proxy)" if c_proxy < 0.5 else "sustained cognitive engagement (High C proxy)"
-    return f"{n_desc} with {c_desc} — indicating {label.lower()} classification."
+def _cognitive_state(cognitive_load_index: float) -> str:
+    if cognitive_load_index < 25:
+        return "Low"
+    if cognitive_load_index < 50:
+        return "Moderate"
+    if cognitive_load_index < 75:
+        return "High"
+    return "Very High"
 
 
-def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/best_model.pt", input_size: int = 48) -> dict:
-    with open("configs/fusion_config.yaml") as f:
-        fusion_cfg = yaml.safe_load(f)
+def _wellness_flag(wellness_score: float) -> str:
+    """Higher wellness_score = better, per its formula — bins run the opposite direction
+    from stress_level/cognitive_state.
+    """
+    if wellness_score >= 75:
+        return "Good"
+    if wellness_score >= 50:
+        return "Moderate"
+    if wellness_score >= 25:
+        return "Needs attention"
+    return "Alert"
 
+
+def _recommendation(stress_level: str, cognitive_state: str) -> str:
+    """Rule-based text combining stress_level and cognitive_state — mirrors the four
+    corner cases the wellness_score formula itself was validated against.
+    """
+    high_stress = stress_level in ("Elevated", "High")
+    high_cognitive = cognitive_state in ("High", "Very High")
+
+    if high_stress and high_cognitive:
+        return (f"Stress markers {stress_level.lower()} alongside {cognitive_state.lower()} "
+                "cognitive load — pushing through despite strain. Consider a short break.")
+    if high_stress:
+        return f"Stress markers {stress_level.lower()}. Consider a short break."
+    if high_cognitive:
+        return "Calm and focused — a productive working state."
+    return "Relaxed, low engagement signals. No action needed, but worth checking in if this persists."
+
+
+def build_interpretation(stress_index: float, cognitive_load_index: float, wellness_score: float) -> dict:
+    stress_level = _stress_level(stress_index)
+    cognitive_state = _cognitive_state(cognitive_load_index)
+    return {
+        "stress_level": stress_level,
+        "cognitive_state": cognitive_state,
+        "wellness_flag": _wellness_flag(wellness_score),
+        "recommendation": _recommendation(stress_level, cognitive_state),
+    }
+
+
+def run_inference(image_path: str) -> dict:
+    """Returns the full scoring JSON (see project v2.0.docx's output schema) plus a few
+    internal fields (prefixed `_`) carrying pixel data the dashboard needs for the
+    annotated-image display — not part of the documented API, stripped by the CLI's
+    `json.dumps` call below.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(fusion_cfg, checkpoint_path, device)
+    backbone = load_frozen_backbone(device=device)
 
-    temp_c = extract_flir_temperature(image_path)
+    temp_c = extract_temperature_array(image_path)
     gray_full_res = normalize_to_grayscale(temp_c)
 
     pipeline = CascadeLandmarkPipeline()
@@ -75,51 +140,49 @@ def run_inference(image_path: str, checkpoint_path: str = "checkpoints/fusion/be
     if not result["success"]:
         raise RuntimeError("No face detected in the captured thermal image (all cascade stages failed) — retake the shot.")
 
-    thresholds = ProxyThresholds.from_config()
-    baseline = load_baseline(DEFAULT_BASELINE_PATH)
-
     roi_temps = extract_roi_temperatures(temp_c, result["landmarks"])
-    # proxy: binary N/C, used ONLY for the natural-language explanation below.
-    # roi_features: raw temps, the actual classifier input (see fusion_model.py docstring).
-    proxy = proxy_vector(roi_temps, baseline, thresholds)
-    roi_features = raw_temperature_vector(roi_temps)
+    ambient_temp = compute_ambient_temperature(temp_c, result["bbox"])
+    normalized = ambient_normalized_roi_temps(roi_temps, ambient_temp)
+    differential = normalized["nose_tip"] - normalized["periorbital"]
 
-    gray_48 = resize_for_cnn(gray_full_res, input_size)
-    # Same EVAL_TRANSFORM (ToTensor + Normalize, no augmentation) used for val/test during
-    # training — must match exactly, or the model sees a different input distribution here
-    # than it was trained/validated on.
-    image_tensor = EVAL_TRANSFORM(Image.fromarray(gray_48, mode="L")).unsqueeze(0).to(device)
-    roi_features_tensor = torch.tensor([roi_features], dtype=torch.float32).to(device)
+    stress_index = compute_stress_index(normalized["nose_tip"], differential)
+    cognitive_load_index = compute_cognitive_load_index(normalized["forehead"])
+    wellness_score = compute_wellness_score(stress_index, cognitive_load_index)
 
+    gray_48 = resize_for_cnn(gray_full_res, 48)
+    image_tensor = EVAL_TRANSFORM(Image.fromarray(gray_48)).unsqueeze(0).to(device)
     with torch.no_grad():
-        expression_vec = model.cnn_encoder(image_tensor)
-        probs = model.fusion_classifier.predict_proba(expression_vec, roi_features_tensor)[0]
-
-    pred_idx = int(probs.argmax())
-    label = CLASS_NAMES[pred_idx]
-    # P(Disengaged) only — "Burned Out" is also a concerning state this doesn't capture.
-    # Left as-is (matches the original single-scalar wellness score design); revisit if a
-    # wellness score that reflects both concerning classes is wanted.
-    wellness_score = float(probs[0])
+        current_features = backbone(image_tensor)[0].cpu().numpy()
+    population_mean_features = load_population_mean_features()
+    confidence = compute_confidence_score(current_features, population_mean_features)
 
     return {
-        "engagement": label,
-        "probabilities": {CLASS_NAMES[i]: float(probs[i]) for i in range(len(CLASS_NAMES))},
-        "wellness_score": wellness_score,
-        "n_proxy": proxy[0],
-        "c_proxy": proxy[1],
-        "roi_temps_c": roi_temps,
-        "explanation": explain(label, proxy[0], proxy[1]),
+        "stress_index": round(stress_index, 1),
+        "cognitive_load_index": round(cognitive_load_index, 1),
+        "wellness_score": round(wellness_score, 1),
+        "measurement_confidence": round(confidence, 1),
+        "ambient_temp": round(ambient_temp, 1),
+        "roi_temps": {k: round(v, 1) for k, v in roi_temps.items()},
+        "normalized_deltas": {
+            "nose_delta": round(normalized["nose_tip"], 1),
+            "forehead_delta": round(normalized["forehead"], 1),
+            "periorbital_delta": round(normalized["periorbital"], 1),
+            "differential": round(differential, 1),
+        },
+        "interpretation": build_interpretation(stress_index, cognitive_load_index, wellness_score),
+        "research_grounding": RESEARCH_GROUNDING,
         "detector_used": result["detector_used"],
+        "_gray_image": gray_full_res,
+        "_bbox": result["bbox"],
+        "_landmarks": result["landmarks"],
     }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("image_path", help="Path to a FLIR E8 radiometric JPEG")
-    parser.add_argument("--checkpoint", default="checkpoints/fusion/best_model.pt")
+    parser.add_argument("image_path", help="Path to a FLIR E8 radiometric JPEG or a raw 16-bit thermal TIFF")
     args = parser.parse_args()
 
-    result = run_inference(args.image_path, args.checkpoint)
-    for k, v in result.items():
-        print(f"{k}: {v}")
+    result = run_inference(args.image_path)
+    public_result = {k: v for k, v in result.items() if not k.startswith("_")}
+    print(json.dumps(public_result, indent=2))

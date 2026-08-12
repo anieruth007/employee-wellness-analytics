@@ -208,12 +208,18 @@ class CascadeLandmarkPipeline:
         # Step 1: MediaPipe on a CLAHE-enhanced copy.
         mp_landmarks = self._mediapipe.detect(apply_clahe(gray_image))
         if mp_landmarks is not None:
+            # bbox from the full 468-point landmark set's extent (not just our 4 ROI
+            # points) — needed for ambient-temperature background masking, which requires
+            # a real face-covering box regardless of which detector found the face.
+            x_min, y_min = mp_landmarks.min(axis=0)
+            x_max, y_max = mp_landmarks.max(axis=0)
+            bbox = (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
             return {
                 "success": True,
                 "detector_used": "mediapipe",
                 "landmarks": _mediapipe_landmarks_to_roi_points(mp_landmarks, self._roi_landmarks),
                 "confidence": 1.0,  # FaceLandmarker's Tasks API doesn't expose a scalar detection score
-                "bbox": None,
+                "bbox": bbox,
             }
 
         # Steps 2-4: OpenCV Haar/LBP cascade chain on the plain (non-CLAHE) grayscale image.
@@ -232,6 +238,40 @@ class CascadeLandmarkPipeline:
     def close(self):
         self._mediapipe.close()
         self._cascade.close()
+
+
+def compute_ambient_temperature(
+    temp_array_c: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    margin: float = 0.25,
+) -> float:
+    """Within-image ambient-temperature reference: mean temperature of background
+    (non-face) pixels, used to normalize ROI temperatures against the specific room the
+    photo was taken in, instead of a fixed population baseline that may have been
+    captured at a different ambient temperature.
+
+    1. Build a face mask from `bbox`, padded by `margin` on each side (a tight bbox would
+       still leave face/hair pixels just outside it counted as "background").
+    2. Invert it -> background/non-face pixel mask.
+    3. Return the mean temperature of those background pixels.
+
+    Falls back to the whole image's mean if the padded bbox covers it entirely (e.g. a
+    tight close-up crop with no visible background) — rare, but division-by-empty-set
+    otherwise.
+    """
+    h, w = temp_array_c.shape
+    x, y, bw, bh = bbox
+    pad_x, pad_y = int(bw * margin), int(bh * margin)
+    x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+    x1, y1 = min(w, x + bw + pad_x), min(h, y + bh + pad_y)
+
+    mask = np.ones((h, w), dtype=bool)
+    mask[y0:y1, x0:x1] = False  # face region (padded) excluded
+    background_pixels = temp_array_c[mask]
+
+    if background_pixels.size == 0:
+        return float(temp_array_c.mean())
+    return float(background_pixels.mean())
 
 
 def extract_roi_temperatures(

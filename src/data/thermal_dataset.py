@@ -103,7 +103,7 @@ class RoomTempDataset(Dataset):
         gray_full_res = normalize_to_grayscale(temp_c)
 
         gray_48 = resize_for_cnn(gray_full_res, self.input_size)
-        pil_image = Image.fromarray(gray_48, mode="L")
+        pil_image = Image.fromarray(gray_48)
         image_tensor = self.transform(pil_image)
         label = self.labels[idx]
 
@@ -186,7 +186,7 @@ class ThermalDataset(Dataset):
         gray_full_res = normalize_to_grayscale(temp_c)
 
         gray_48 = resize_for_cnn(gray_full_res, self.input_size)
-        pil_image = Image.fromarray(gray_48, mode="L")
+        pil_image = Image.fromarray(gray_48)
         image_tensor = self.transform(pil_image)
         roi_features_tensor = torch.tensor(self.roi_features[idx], dtype=torch.float32)
         label = self.labels[idx]
