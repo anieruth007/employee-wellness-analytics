@@ -1,10 +1,10 @@
 cognitive_load_index:
   p5: 1.4018096542358407
   p95: 10.528465957641599
-derivation: "P5/P95 of stress_raw=(-nose_delta+abs(differential))/2 and cognitive_raw=forehead_delta,\
+derivation: "P5/P95 of stress_raw=abs(differential) and cognitive_raw=forehead_delta,\
   \ computed over Charlotte-ThermalFace's ambient-normalized population \u2014 see\
   \ scripts/compute_normalization_bounds.py"
 n_images: 6640
 stress_index:
-  p5: -4.600552356243133
-  p95: -1.1916327476501496
+  p5: 0.06440134048461914
+  p95: 3.8640961170196517

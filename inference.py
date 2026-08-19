@@ -30,12 +30,46 @@ from src.scoring.stress_index import compute_stress_index
 from src.scoring.wellness_score import compute_wellness_score
 
 RESEARCH_GROUNDING = {
-    "stress_basis": "Fernandez et al. (2024, Anxiety Stress & Coping) - nose tip temperature "
-                     "as a stress index; Gioia et al. (2023, Sensors) - differential index as "
-                     "an autonomic marker.",
+    "stress_basis": "Stress Index derived from nose-periorbital differential index - "
+                     "validated as the primary autonomic nervous system marker by Gioia "
+                     "et al. (2023).",
     "cognitive_basis": "Forehead thermal elevation under cognitive load - Frontiers in "
                         "Psychiatry (2025).",
 }
+
+# Population P5/P95 bounds (configs/normalization_bounds.yaml, fit on Charlotte-ThermalFace)
+# saturate on real FLIR E8 captures of a single subject: scripts/validate_collected_faces.py
+# found a 16-image self-collected set (5 neutral / 5 engaged / 6 stressed) where most
+# stress_index values pinned at 90-100 regardless of condition, because ambient-normalized
+# deltas for one real subject sit in a much narrower, individually-shifted range than the
+# population bounds assume.
+#
+# Personal-baseline mode re-centers deltas against THIS subject's own resting-state mean
+# (scripts/compute_personal_baseline.py) before scoring, then scales with these bounds
+# instead of the population ones.
+#
+# stress_index bounds: the production formula is stress_raw = abs(differential) (see
+# src/scoring/stress_index.py) -- valid because differential is consistently negative
+# across the population, so abs(differential) == -differential. That equivalence breaks
+# for a *baseline-relative* differential, which crosses zero in both directions (e.g. the
+# 16-image set's "engaged" condition shifted differential positive relative to baseline,
+# "stressed" shifted it further negative) -- taking abs() of the relative value would
+# incorrectly score both directions as "more stress". Personal-baseline stress therefore
+# uses the signed quantity -relative_differential directly (more-negative-than-baseline
+# differential -> higher stress), computed inline in run_inference rather than through
+# compute_stress_raw. These bounds are the empirical min/max of that signed quantity across
+# the 16-image validation set -- provisional pending a larger personal-baseline population.
+# cognitive_load_index bounds are anchored on the original threshold spec
+# (relative_forehead > +0.3degC -> high load), not yet refit from data.
+PERSONAL_BASELINE_BOUNDS = {
+    "stress_index": {"p5": -1.26, "p95": 0.44},
+    "cognitive_load_index": {"p5": -0.3, "p95": 0.3},
+}
+
+
+def load_personal_baseline(path: str) -> dict:
+    with open(path) as f:
+        return json.load(f)
 
 
 def extract_temperature_array(image_path: str) -> np.ndarray:
@@ -122,11 +156,17 @@ def build_interpretation(stress_index: float, cognitive_load_index: float, welln
     }
 
 
-def run_inference(image_path: str) -> dict:
+def run_inference(image_path: str, personal_baseline_path: str = None) -> dict:
     """Returns the full scoring JSON (see project v2.0.docx's output schema) plus a few
     internal fields (prefixed `_`) carrying pixel data the dashboard needs for the
     annotated-image display — not part of the documented API, stripped by the CLI's
     `json.dumps` call below.
+
+    personal_baseline_path: optional path to a data/labels/personal_baseline_*.json file
+    (scripts/compute_personal_baseline.py). When given, stress_index and
+    cognitive_load_index are computed from deltas re-centered against this subject's own
+    resting baseline (using PERSONAL_BASELINE_BOUNDS to scale) instead of the population
+    P5/P95 bounds — see the PERSONAL_BASELINE_BOUNDS comment above for why.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     backbone = load_frozen_backbone(device=device)
@@ -145,8 +185,30 @@ def run_inference(image_path: str) -> dict:
     normalized = ambient_normalized_roi_temps(roi_temps, ambient_temp)
     differential = normalized["nose_tip"] - normalized["periorbital"]
 
-    stress_index = compute_stress_index(normalized["nose_tip"], differential)
-    cognitive_load_index = compute_cognitive_load_index(normalized["forehead"])
+    personal_baseline = None
+    ambient_drift = None
+    if personal_baseline_path:
+        personal_baseline = load_personal_baseline(personal_baseline_path)
+        relative_nose = normalized["nose_tip"] - personal_baseline["nose_delta_mean"]
+        relative_forehead = normalized["forehead"] - personal_baseline["forehead_delta_mean"]
+        relative_periorbital = normalized["periorbital"] - personal_baseline["periorbital_delta_mean"]
+        relative_differential = differential - personal_baseline["differential_mean"]
+        ambient_drift = ambient_temp - personal_baseline["ambient_temp_mean"]
+
+        # Signed, not compute_stress_raw's abs() -- see PERSONAL_BASELINE_BOUNDS comment.
+        personal_stress_raw = -relative_differential
+        stress_p5 = PERSONAL_BASELINE_BOUNDS["stress_index"]["p5"]
+        stress_p95 = PERSONAL_BASELINE_BOUNDS["stress_index"]["p95"]
+        stress_index = max(0.0, min(100.0, 100 * (personal_stress_raw - stress_p5) / (stress_p95 - stress_p5)))
+        cognitive_load_index = compute_cognitive_load_index(
+            relative_forehead,
+            p5=PERSONAL_BASELINE_BOUNDS["cognitive_load_index"]["p5"],
+            p95=PERSONAL_BASELINE_BOUNDS["cognitive_load_index"]["p95"],
+        )
+    else:
+        stress_index = compute_stress_index(differential)
+        cognitive_load_index = compute_cognitive_load_index(normalized["forehead"])
+
     wellness_score = compute_wellness_score(stress_index, cognitive_load_index)
 
     gray_48 = resize_for_cnn(gray_full_res, 48)
@@ -156,7 +218,7 @@ def run_inference(image_path: str) -> dict:
     population_mean_features = load_population_mean_features()
     confidence = compute_confidence_score(current_features, population_mean_features)
 
-    return {
+    output = {
         "stress_index": round(stress_index, 1),
         "cognitive_load_index": round(cognitive_load_index, 1),
         "wellness_score": round(wellness_score, 1),
@@ -177,12 +239,30 @@ def run_inference(image_path: str) -> dict:
         "_landmarks": result["landmarks"],
     }
 
+    if personal_baseline is not None:
+        output["personal_baseline_used"] = True
+        output["personal_baseline_session"] = Path(personal_baseline_path).stem.replace("personal_baseline_", "")
+        output["relative_deltas"] = {
+            "relative_nose": round(relative_nose, 2),
+            "relative_forehead": round(relative_forehead, 2),
+            "relative_periorbital": round(relative_periorbital, 2),
+            "relative_differential": round(relative_differential, 2),
+        }
+        output["ambient_drift_from_baseline"] = round(ambient_drift, 2)
+        output["ambient_drift_flag"] = abs(ambient_drift) > 1.0
+    else:
+        output["personal_baseline_used"] = False
+
+    return output
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("image_path", help="Path to a FLIR E8 radiometric JPEG or a raw 16-bit thermal TIFF")
+    parser.add_argument("--personal-baseline", default=None,
+                         help="Path to a data/labels/personal_baseline_*.json file (scripts/compute_personal_baseline.py)")
     args = parser.parse_args()
 
-    result = run_inference(args.image_path)
+    result = run_inference(args.image_path, personal_baseline_path=args.personal_baseline)
     public_result = {k: v for k, v in result.items() if not k.startswith("_")}
     print(json.dumps(public_result, indent=2))

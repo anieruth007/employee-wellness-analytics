@@ -46,7 +46,7 @@ def main():
     normalized = ambient_normalized_roi_temps(roi_temps, ambient_temp)
     differential = normalized["nose_tip"] - normalized["periorbital"]
 
-    stress_index = compute_stress_index(normalized["nose_tip"], differential)
+    stress_index = compute_stress_index(differential)
     cognitive_load_index = compute_cognitive_load_index(normalized["forehead"])
     wellness_score = compute_wellness_score(stress_index, cognitive_load_index)
 

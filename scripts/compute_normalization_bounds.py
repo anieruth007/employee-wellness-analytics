@@ -2,8 +2,13 @@
 for the Stress Index and Cognitive Load Index, from the Charlotte-ThermalFace population's
 own ambient-normalized ROI distribution (already cached — no re-detection needed).
 
-  stress_raw     = (-nose_delta + abs(differential)) / 2
+  stress_raw     = abs(differential)
   cognitive_raw  = forehead_delta
+
+stress_raw was originally (-nose_delta + abs(differential)) / 2 — dropped nose_delta after
+validating on a 16-image self-collected FLIR E8 set (scripts/validate_collected_faces.py):
+abs(differential) alone cleanly ranked stressed > neutral > engaged matching self-report
+labels, while nose_delta ranked the conditions backwards. See src/scoring/stress_index.py.
 
 Saves bounds to configs/normalization_bounds.yaml, consumed by
 src/scoring/stress_index.py and src/scoring/cognitive_load_index.py.
@@ -32,11 +37,10 @@ def main():
     print(f"Successfully-detected images with normalized_roi: {len(detected)}/{len(records)}")
 
     # normalized_roi = [nose_delta, forehead_delta, periorbital_delta, upper_lip_delta, differential]
-    nose_delta = np.array([r["normalized_roi"][0] for r in detected])
     forehead_delta = np.array([r["normalized_roi"][1] for r in detected])
     differential = np.array([r["normalized_roi"][4] for r in detected])
 
-    stress_raw = (-nose_delta + np.abs(differential)) / 2
+    stress_raw = np.abs(differential)
     cognitive_raw = forehead_delta  # as specified, no transform
 
     stress_p5, stress_p95 = float(np.percentile(stress_raw, 5)), float(np.percentile(stress_raw, 95))
@@ -54,9 +58,9 @@ def main():
         "stress_index": {"p5": stress_p5, "p95": stress_p95},
         "cognitive_load_index": {"p5": cognitive_p5, "p95": cognitive_p95},
         "derivation": (
-            "P5/P95 of stress_raw=(-nose_delta+abs(differential))/2 and cognitive_raw="
-            "forehead_delta, computed over Charlotte-ThermalFace's ambient-normalized "
-            "population — see scripts/compute_normalization_bounds.py"
+            "P5/P95 of stress_raw=abs(differential) and cognitive_raw=forehead_delta, "
+            "computed over Charlotte-ThermalFace's ambient-normalized population — see "
+            "scripts/compute_normalization_bounds.py"
         ),
         "n_images": len(detected),
     }
